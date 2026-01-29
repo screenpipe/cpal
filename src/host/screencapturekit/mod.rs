@@ -132,7 +132,7 @@ impl Device {
     }
 
     fn name(&self) -> String {
-        format!("Display {}", self.display.display_id())
+        format!("Display {}", self.display.display_id().0)
     }
 
     fn supported_input_configs(
