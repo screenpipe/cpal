@@ -73,6 +73,9 @@ impl Drop for AudioObjectPropertyListener {
 }
 
 /// Callback used to call user-provided closure as a property listener.
+///
+/// This is called from CoreAudio (C FFI) — panics must not cross this boundary
+/// or the process will abort. We wrap the call in `catch_unwind` as a safety net.
 unsafe extern "C" fn property_listener_handler_shim(
     _: AudioObjectID,
     _: u32,
@@ -80,6 +83,8 @@ unsafe extern "C" fn property_listener_handler_shim(
     callback: *mut ::std::os::raw::c_void,
 ) -> OSStatus {
     let wrapper = callback as *mut PropertyListenerCallbackWrapper;
-    (*wrapper).0();
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        (*wrapper).0();
+    }));
     0
 }

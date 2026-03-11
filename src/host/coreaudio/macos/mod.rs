@@ -489,9 +489,14 @@ where
         },
         move || {
             if let Some(stream_inner_strong) = stream_inner_weak.upgrade() {
-                let mut stream_inner = stream_inner_strong.lock().unwrap();
-                let _ = stream_inner.pause();
-                (error_callback.lock().unwrap())(StreamError::DeviceNotAvailable);
+                // Use `lock().ok()` instead of `.unwrap()` — this closure runs inside
+                // an `extern "C"` CoreAudio callback where panics abort the process.
+                if let Some(mut stream_inner) = stream_inner_strong.lock().ok() {
+                    let _ = stream_inner.pause();
+                }
+                if let Some(mut error_cb) = error_callback.lock().ok() {
+                    error_cb(StreamError::DeviceNotAvailable);
+                }
             }
         },
     )?);
