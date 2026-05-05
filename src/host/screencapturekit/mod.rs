@@ -5,7 +5,7 @@ use crate::{
     BackendSpecificError, BuildStreamError, Data, DefaultStreamConfigError, DevicesError,
     InputCallbackInfo, OutputCallbackInfo, PauseStreamError, PlayStreamError, SampleFormat,
     SampleRate, StreamConfig, StreamError, StreamInstant, SupportedBufferSize,
-    SupportedStreamConfig, SupportedStreamConfigRange, SupportedStreamConfigsError,
+    SupportedStreamConfig, SupportedStreamConfigRange, SupportedStreamConfigsError, SizedSample,
 };
 
 use cidre::{
@@ -88,6 +88,35 @@ impl DeviceTrait for Device {
         Self::default_output_config(self)
     }
 
+    fn build_input_stream<T, D, E>(
+        &self,
+        config: &StreamConfig,
+        mut data_callback: D,
+        error_callback: E,
+        timeout: Option<Duration>,
+        #[cfg(target_os = "macos")]
+        _voice_processing_input_config: Option<crate::MacosVoiceProcessingInputConfig>,
+    ) -> Result<Self::Stream, BuildStreamError>
+    where
+        T: SizedSample,
+        D: FnMut(&[T], &InputCallbackInfo) + Send + 'static,
+        E: FnMut(StreamError) + Send + 'static,
+    {
+        let _ = _voice_processing_input_config;
+        self.build_input_stream_raw(
+            config,
+            T::FORMAT,
+            move |data: &Data, info: &InputCallbackInfo| {
+                let callback = data
+                    .as_slice::<T>()
+                    .expect("host supplied incorrect sample type");
+                data_callback(callback, info);
+            },
+            error_callback,
+            timeout,
+        )
+    }
+
     fn build_input_stream_raw<D, E>(
         &self,
         config: &StreamConfig,
@@ -100,7 +129,13 @@ impl DeviceTrait for Device {
         D: FnMut(&Data, &InputCallbackInfo) + Send + 'static,
         E: FnMut(StreamError) + Send + 'static,
     {
-        Self::build_input_stream(self, config, sample_format, data_callback, error_callback)
+        Self::build_input_stream(
+            self,
+            config,
+            sample_format,
+            data_callback,
+            error_callback,
+        )
     }
 
     fn build_output_stream_raw<D, E>(
