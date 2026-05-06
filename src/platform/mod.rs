@@ -99,6 +99,7 @@ macro_rules! impl_platform_host {
         /// - `"null"` - Null host
         /// - `"wasapi"` - Windows Audio Session API
         /// - `"webaudio"` - Web Audio API
+        /// - `"screencapturekit"` - ScreenCaptureKit (macOS system audio via display capture)
         ///
         /// # Cross-Platform Example
         ///
@@ -842,9 +843,13 @@ mod platform_impl {
     #[cfg(all(feature = "jack", target_os = "macos"))]
     #[cfg_attr(docsrs, doc(cfg(all(feature = "jack", target_os = "macos"))))]
     pub use crate::host::jack::Host as JackHost;
+    #[cfg(target_os = "macos")]
+    #[cfg_attr(docsrs, doc(cfg(target_os = "macos")))]
+    pub use crate::host::screencapturekit::Host as ScreenCaptureKitHost;
 
     impl_platform_host!(
         CoreAudio => CoreAudioHost,
+        #[cfg(target_os = "macos")] ScreenCaptureKit "ScreenCaptureKit" => ScreenCaptureKitHost,
         #[cfg(all(feature = "jack", target_os = "macos"))] Jack "JACK" => JackHost,
         #[cfg(feature = "custom")] Custom => super::CustomHost
     );

@@ -66,7 +66,7 @@ fn asbd_from_config(
 }
 
 #[inline]
-fn host_time_to_stream_instant(m_host_time: u64) -> Result<StreamInstant, Error> {
+pub(crate) fn host_time_to_stream_instant(m_host_time: u64) -> Result<StreamInstant, Error> {
     let mut info: mach2::mach_time::mach_timebase_info = Default::default();
     let res = unsafe { mach2::mach_time::mach_timebase_info(&mut info) };
     check_os_status(res)?;

@@ -72,6 +72,9 @@ pub(crate) mod audioworklet;
 #[cfg(target_vendor = "apple")]
 pub(crate) mod coreaudio;
 
+#[cfg(target_os = "macos")]
+pub(crate) mod screencapturekit;
+
 #[cfg(all(
     feature = "jack",
     any(
