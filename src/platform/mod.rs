@@ -846,10 +846,14 @@ mod platform_impl {
     #[cfg(target_os = "macos")]
     #[cfg_attr(docsrs, doc(cfg(target_os = "macos")))]
     pub use crate::host::screencapturekit::Host as ScreenCaptureKitHost;
+    #[cfg(target_os = "macos")]
+    #[cfg_attr(docsrs, doc(cfg(target_os = "macos")))]
+    pub use crate::host::voice_processing_io::Host as VoiceProcessingIoHost;
 
     impl_platform_host!(
         CoreAudio => CoreAudioHost,
         #[cfg(target_os = "macos")] ScreenCaptureKit "ScreenCaptureKit" => ScreenCaptureKitHost,
+        #[cfg(target_os = "macos")] VoiceProcessingIo "VoiceProcessingIO" => VoiceProcessingIoHost,
         #[cfg(all(feature = "jack", target_os = "macos"))] Jack "JACK" => JackHost,
         #[cfg(feature = "custom")] Custom => super::CustomHost
     );
@@ -859,6 +863,24 @@ mod platform_impl {
         CoreAudioHost::new()
             .expect("the default host should always be available")
             .into()
+    }
+
+    /// Push samples into the Voice Processing I/O unit's **output** render path (echo reference for
+    /// AEC). Only applies to streams from [`HostId::VoiceProcessingIo`].
+    #[cfg(target_os = "macos")]
+    impl Stream {
+        pub fn push_voice_processing_playback_f32(
+            &self,
+            samples: &[f32],
+        ) -> Result<(), crate::Error> {
+            match self.as_inner() {
+                StreamInner::VoiceProcessingIo(s) => {
+                    s.extend_playback(samples);
+                    Ok(())
+                }
+                _ => Err(crate::Error::new(crate::ErrorKind::UnsupportedOperation)),
+            }
+        }
     }
 }
 

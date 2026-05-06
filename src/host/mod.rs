@@ -75,6 +75,9 @@ pub(crate) mod coreaudio;
 #[cfg(target_os = "macos")]
 pub(crate) mod screencapturekit;
 
+#[cfg(target_os = "macos")]
+pub(crate) mod voice_processing_io;
+
 #[cfg(all(
     feature = "jack",
     any(
