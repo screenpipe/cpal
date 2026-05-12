@@ -61,9 +61,18 @@ const PKEY_AUDIOENDPOINT_JACKSUBTYPE: PROPERTYKEY = PROPERTYKEY {
     pid: 8,
 };
 
-const DEFAULT_FLAGS: u32 = Audio::AUDCLNT_STREAMFLAGS_EVENTCALLBACK
-    | Audio::AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY
-    | Audio::AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM;
+// Reverted from PR #1097's `EVENTCALLBACK | SRC_DEFAULT_QUALITY |
+// AUTOCONVERTPCM`. On Windows 11 24H2 the AUTOCONVERTPCM flag causes
+// the WASAPI server's Communications-class resampler to deliver
+// silent streams (zero samples) to non-Communications consumers,
+// even though Initialize succeeds and callbacks fire. The same mic
+// records normal speech at -3 dB peak via DirectShow on the same
+// machine at the same moment. See https://github.com/RustAudio/cpal/issues/1200
+// (filed 2026-05-12 by screenpipe) for the diagnosis. Removing the
+// flag here restores pre-#1097 behavior: Windows rejects requests
+// for non-native rates, which is what cpal v0.15.3 did and what
+// screenpipe (and presumably others) had been relying on.
+const DEFAULT_FLAGS: u32 = Audio::AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
 
 /// Wrapper because of that stupid decision to remove `Send` and `Sync` from raw pointers.
 #[derive(Clone)]
