@@ -31,7 +31,7 @@ use windows::{
     core::{Interface, GUID},
     Win32::{
         Devices::Properties,
-        Foundation::{ERROR_TIMEOUT, PROPERTYKEY},
+        Foundation::{ERROR_TIMEOUT, PROPERTYKEY, S_FALSE},
         Media::{Audio, Audio::IAudioRenderClient, KernelStreaming, Multimedia},
         System::{
             Com,
@@ -207,14 +207,45 @@ unsafe fn data_flow_from_immendpoint(endpoint: &Audio::IMMEndpoint) -> Audio::ED
 }
 
 // Given the audio client and format, returns whether or not the format is supported.
+//
+// Partial revert of PR #1097: the upstream PR replaced this real
+// IsFormatSupported call with `Ok(true)` on the assumption that
+// AUTOCONVERTPCM would make every requested format succeed. We've
+// dropped AUTOCONVERTPCM (see DEFAULT_FLAGS above) so we need the
+// genuine check back — without it, the enumerator believes every
+// candidate rate/format is supported and reports configs that
+// WASAPI then refuses in `Initialize`, surfacing as
+// AUDCLNT_E_UNSUPPORTED_FORMAT on the user's audio thread.
+// On Win11 24H2 specifically that causes Communications-class USB
+// endpoints to be exposed only at 16kHz (the broken Comms mix
+// format) instead of their real 44.1/48kHz hardware rates.
+// See https://github.com/RustAudio/cpal/issues/1200 for the bisect.
 pub unsafe fn is_format_supported(
-    _client: &Audio::IAudioClient,
-    _waveformatex_ptr: *const Audio::WAVEFORMATEX,
+    client: &Audio::IAudioClient,
+    waveformatex_ptr: *const Audio::WAVEFORMATEX,
 ) -> Result<bool, Error> {
-    // Checking formats is not needed for shared mode with auto-conversion, therefore this check has been removed until someone implements WASAPI exclusive mode support
-    // I used an NAudio issue as reference: https://github.com/naudio/NAudio/issues/819
+    let mut closest_waveformatex_ptr: *mut Audio::WAVEFORMATEX = ptr::null_mut();
 
-    Ok(true)
+    let result = client.IsFormatSupported(
+        Audio::AUDCLNT_SHAREMODE_SHARED,
+        waveformatex_ptr,
+        Some(&mut closest_waveformatex_ptr as *mut _),
+    );
+
+    if !closest_waveformatex_ptr.is_null() {
+        Com::CoTaskMemFree(Some(closest_waveformatex_ptr as *mut std::ffi::c_void));
+    }
+
+    // `IsFormatSupported` returns `S_FALSE` when WASAPI found a compatible
+    // format but not an exact match — for the purposes of "can we use this
+    // exact format" that's a no, so we treat it as unsupported. Pre-#1097
+    // behavior.
+    match result {
+        Audio::AUDCLNT_E_DEVICE_INVALIDATED => Err(Error::new(ErrorKind::DeviceNotAvailable)),
+        r if r.is_err() => Ok(false),
+        S_FALSE => Ok(false),
+        _ => Ok(true),
+    }
 }
 
 // Get a cpal Format from a WAVEFORMATEX.
