@@ -4,8 +4,8 @@ use crate::{
     traits::{DeviceTrait, HostTrait, StreamTrait},
     BackendSpecificError, BuildStreamError, Data, DefaultStreamConfigError, DevicesError,
     InputCallbackInfo, OutputCallbackInfo, PauseStreamError, PlayStreamError, SampleFormat,
-    SampleRate, StreamConfig, StreamError, StreamInstant, SupportedBufferSize,
-    SupportedStreamConfig, SupportedStreamConfigRange, SupportedStreamConfigsError, SizedSample,
+    SampleRate, SizedSample, StreamConfig, StreamError, StreamInstant, SupportedBufferSize,
+    SupportedStreamConfig, SupportedStreamConfigRange, SupportedStreamConfigsError,
 };
 
 use cidre::{
@@ -94,8 +94,9 @@ impl DeviceTrait for Device {
         mut data_callback: D,
         error_callback: E,
         timeout: Option<Duration>,
-        #[cfg(target_os = "macos")]
-        _voice_processing_input_config: Option<crate::MacosVoiceProcessingInputConfig>,
+        #[cfg(target_os = "macos")] _voice_processing_input_config: Option<
+            crate::MacosVoiceProcessingInputConfig,
+        >,
     ) -> Result<Self::Stream, BuildStreamError>
     where
         T: SizedSample,
@@ -129,13 +130,7 @@ impl DeviceTrait for Device {
         D: FnMut(&Data, &InputCallbackInfo) + Send + 'static,
         E: FnMut(StreamError) + Send + 'static,
     {
-        Self::build_input_stream(
-            self,
-            config,
-            sample_format,
-            data_callback,
-            error_callback,
-        )
+        Self::build_input_stream(self, config, sample_format, data_callback, error_callback)
     }
 
     fn build_output_stream_raw<D, E>(

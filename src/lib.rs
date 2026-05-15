@@ -265,6 +265,9 @@ pub struct StreamConfig {
     pub channels: ChannelCount,
     pub sample_rate: SampleRate,
     pub buffer_size: BufferSize,
+    /// Windows WASAPI-only: request endpoint Acoustic Echo Cancellation for input streams.
+    #[cfg(target_os = "windows")]
+    pub windows_input_aec: bool,
 }
 
 #[cfg(target_os = "macos")]
@@ -280,12 +283,14 @@ pub enum DuckingLevel {
     Max,
 }
 
+#[cfg(target_os = "macos")]
 impl Default for DuckingLevel {
     fn default() -> Self {
         Self::Default
     }
 }
 
+#[cfg(target_os = "macos")]
 impl DuckingLevel {
     pub fn as_u32(self) -> u32 {
         match self {
@@ -457,6 +462,8 @@ impl SupportedStreamConfig {
             channels: self.channels,
             sample_rate: self.sample_rate,
             buffer_size: BufferSize::Default,
+            #[cfg(target_os = "windows")]
+            windows_input_aec: false,
         }
     }
 }
