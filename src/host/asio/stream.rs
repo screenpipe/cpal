@@ -638,6 +638,7 @@ fn check_config(
         channels,
         sample_rate,
         buffer_size: _,
+        windows_input_aec: _,
     } = config;
     // Try and set the sample rate to what the user selected.
     let sample_rate = sample_rate.0.into();

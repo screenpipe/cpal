@@ -142,6 +142,16 @@ impl Drop for WaveFormatExPtr {
     }
 }
 
+struct IdRAII(windows::core::PWSTR);
+
+impl Drop for IdRAII {
+    fn drop(&mut self) {
+        unsafe {
+            Com::CoTaskMemFree(Some(self.0 .0 as *mut _));
+        }
+    }
+}
+
 unsafe fn immendpoint_from_immdevice(device: Audio::IMMDevice) -> Audio::IMMEndpoint {
     device
         .cast::<Audio::IMMEndpoint>()
@@ -332,7 +342,7 @@ impl Device {
     /// Ensures that `future_audio_client` contains a `Some` and returns a locked mutex to it.
     fn ensure_future_audio_client(
         &self,
-    ) -> Result<MutexGuard<Option<IAudioClientWrapper>>, windows::core::Error> {
+    ) -> Result<MutexGuard<'_, Option<IAudioClientWrapper>>, windows::core::Error> {
         let mut lock = self.future_audio_client.lock().unwrap();
         if lock.is_some() {
             return Ok(lock);
@@ -353,6 +363,45 @@ impl Device {
     pub(crate) fn build_audioclient(&self) -> Result<Audio::IAudioClient, windows::core::Error> {
         let mut lock = self.ensure_future_audio_client()?;
         Ok(lock.take().unwrap().0)
+    }
+
+    fn maybe_set_input_aec_properties(audio_client: &Audio::IAudioClient, enabled: bool) {
+        if !enabled {
+            return;
+        }
+
+        let Ok(audio_client_2) = audio_client.cast::<Audio::IAudioClient2>() else {
+            return;
+        };
+
+        let properties = Audio::AudioClientProperties {
+            cbSize: mem::size_of::<Audio::AudioClientProperties>() as u32,
+            bIsOffload: Foundation::FALSE,
+            eCategory: Audio::AudioCategory_Communications,
+            Options: Audio::AUDCLNT_STREAMOPTIONS_NONE,
+        };
+
+        let _ = unsafe { audio_client_2.SetClientProperties(&properties) };
+    }
+
+    fn maybe_enable_input_aec(audio_client: &Audio::IAudioClient, enabled: bool) {
+        if !enabled {
+            return;
+        }
+
+        let Ok(aec_control) =
+            (unsafe { audio_client.GetService::<Audio::IAcousticEchoCancellationControl>() })
+        else {
+            return;
+        };
+
+        if let Some(render_endpoint_id) = default_render_endpoint_id_for_aec() {
+            let _ = unsafe {
+                aec_control.SetEchoCancellationRenderEndpoint(windows::core::PCWSTR(
+                    render_endpoint_id.0 .0,
+                ))
+            };
+        }
     }
 
     // There is no way to query the list of all formats that are supported by the
@@ -431,6 +480,7 @@ impl Device {
                             channels: format.channels,
                             sample_rate,
                             buffer_size: BufferSize::Default,
+                            windows_input_aec: false,
                         },
                         sample_format,
                     ) {
@@ -566,6 +616,10 @@ impl Device {
                 let format_attempt = config_to_waveformatextensible(config, sample_format)
                     .ok_or(BuildStreamError::StreamConfigNotSupported)?;
                 let share_mode = Audio::AUDCLNT_SHAREMODE_SHARED;
+                let input_aec_enabled =
+                    config.windows_input_aec && self.data_flow() == Audio::eCapture;
+
+                Self::maybe_set_input_aec_properties(&audio_client, input_aec_enabled);
 
                 // Ensure the format is supported.
                 match super::device::is_format_supported(&audio_client, &format_attempt.Format) {
@@ -597,6 +651,9 @@ impl Device {
 
                 format_attempt.Format
             };
+
+            let input_aec_enabled = config.windows_input_aec && self.data_flow() == Audio::eCapture;
+            Self::maybe_enable_input_aec(&audio_client, input_aec_enabled);
 
             // obtaining the size of the samples buffer in number of frames
             let max_frames_in_buffer = audio_client
@@ -912,6 +969,17 @@ fn default_device(data_flow: Audio::EDataFlow) -> Option<Device> {
             .ok()?;
         // TODO: check specifically for `E_NOTFOUND`, and panic otherwise
         Some(Device::from_immdevice(device))
+    }
+}
+
+fn default_render_endpoint_id_for_aec() -> Option<IdRAII> {
+    unsafe {
+        let enumerator = &get_enumerator().0;
+        let device = enumerator
+            .GetDefaultAudioEndpoint(Audio::eRender, Audio::eCommunications)
+            .or_else(|_| enumerator.GetDefaultAudioEndpoint(Audio::eRender, Audio::eConsole))
+            .ok()?;
+        device.GetId().ok().map(IdRAII)
     }
 }
 

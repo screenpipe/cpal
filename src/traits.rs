@@ -133,8 +133,9 @@ pub trait DeviceTrait {
         mut data_callback: D,
         error_callback: E,
         timeout: Option<Duration>,
-        #[cfg(target_os = "macos")]
-        _voice_processing_input_config: Option<crate::MacosVoiceProcessingInputConfig>,
+        #[cfg(target_os = "macos")] _voice_processing_input_config: Option<
+            crate::MacosVoiceProcessingInputConfig,
+        >,
     ) -> Result<Self::Stream, BuildStreamError>
     where
         T: SizedSample,

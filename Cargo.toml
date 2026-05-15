@@ -93,4 +93,7 @@ name = "feedback"
 name = "record_wav"
 
 [[example]]
+name = "record_wav_aec"
+
+[[example]]
 name = "synth_tones"

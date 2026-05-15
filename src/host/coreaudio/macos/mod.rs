@@ -27,9 +27,8 @@ use crate::traits::{DeviceTrait, HostTrait, StreamTrait};
 use crate::{
     BackendSpecificError, BufferSize, BuildStreamError, ChannelCount, Data,
     DefaultStreamConfigError, DeviceNameError, DevicesError, InputCallbackInfo, OutputCallbackInfo,
-    PauseStreamError, PlayStreamError, SampleFormat, SampleRate, SizedSample,
-    StreamConfig, StreamError,
-    SupportedBufferSize, SupportedStreamConfig, SupportedStreamConfigRange,
+    PauseStreamError, PlayStreamError, SampleFormat, SampleRate, SizedSample, StreamConfig,
+    StreamError, SupportedBufferSize, SupportedStreamConfig, SupportedStreamConfigRange,
     SupportedStreamConfigsError,
 };
 use std::ffi::CStr;
@@ -699,13 +698,12 @@ impl Device {
         // Potentially change the device sample rate to match the config.
         set_sample_rate(self.audio_device_id, config.sample_rate)?;
 
-        let mut audio_unit =
-            build_voice_processing_audio_unit(
-                self,
-                config,
-                sample_format,
-                &use_voice_processing_input_config.expect("voice processing config is required"),
-            )?;
+        let mut audio_unit = build_voice_processing_audio_unit(
+            self,
+            config,
+            sample_format,
+            &use_voice_processing_input_config.expect("voice processing config is required"),
+        )?;
 
         // Set the stream in interleaved mode.
         let asbd = asbd_from_config(config, sample_format);
@@ -900,7 +898,6 @@ impl Device {
 
         Ok(stream)
     }
-
 }
 
 #[cfg(target_os = "macos")]
@@ -936,8 +933,18 @@ fn build_voice_processing_audio_unit(
     )?;
 
     let asbd = asbd_from_config(config, sample_format);
-    audio_unit.set_property(kAudioUnitProperty_StreamFormat, Scope::Output, Element::Input, Some(&asbd))?;
-    audio_unit.set_property(kAudioUnitProperty_StreamFormat, Scope::Input, Element::Output, Some(&asbd))?;
+    audio_unit.set_property(
+        kAudioUnitProperty_StreamFormat,
+        Scope::Output,
+        Element::Input,
+        Some(&asbd),
+    )?;
+    audio_unit.set_property(
+        kAudioUnitProperty_StreamFormat,
+        Scope::Input,
+        Element::Output,
+        Some(&asbd),
+    )?;
 
     if let Some(agc_enabled) = voice_processing.voice_processing_enable_agc {
         let agc_value: u32 = u32::from(agc_enabled);
@@ -1052,7 +1059,6 @@ fn audio_unit_from_device(device: &Device, input: bool) -> Result<AudioUnit, cor
 
     Ok(audio_unit)
 }
-
 
 /// Attempt to set the device sample rate to the provided rate.
 /// Return an error if the requested sample rate is not supported by the device.
