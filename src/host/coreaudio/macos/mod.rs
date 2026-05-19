@@ -921,11 +921,7 @@ fn configure_voice_processing_io(audio_unit: &mut AudioUnit) -> Result<(), corea
 }
 
 #[cfg(target_os = "macos")]
-fn apply_voice_processing_property(
-    audio_unit: &mut AudioUnit,
-    property: u32,
-    value: &u32,
-) {
+fn apply_voice_processing_property(audio_unit: &mut AudioUnit, property: u32, value: &u32) {
     for element in [Element::Input, Element::Output] {
         let _ = audio_unit.set_property(property, Scope::Global, element, Some(value));
     }
@@ -937,18 +933,14 @@ fn apply_voice_processing_flags(
     voice_processing: &crate::MacosVoiceProcessingInputConfig,
 ) {
     let bypass = u32::from(voice_processing.voice_processing_bypass.unwrap_or(false));
-    let agc = u32::from(voice_processing.voice_processing_enable_agc.unwrap_or(false));
+    let agc = u32::from(
+        voice_processing
+            .voice_processing_enable_agc
+            .unwrap_or(false),
+    );
     let mute_output = 0u32;
-    apply_voice_processing_property(
-        audio_unit,
-        K_AU_VOICE_IO_BYPASS_VOICE_PROCESSING,
-        &bypass,
-    );
-    apply_voice_processing_property(
-        audio_unit,
-        K_AU_VOICE_IO_VOICE_PROCESSING_ENABLE_AGC,
-        &agc,
-    );
+    apply_voice_processing_property(audio_unit, K_AU_VOICE_IO_BYPASS_VOICE_PROCESSING, &bypass);
+    apply_voice_processing_property(audio_unit, K_AU_VOICE_IO_VOICE_PROCESSING_ENABLE_AGC, &agc);
     apply_voice_processing_property(audio_unit, K_AU_VOICE_IO_MUTE_OUTPUT, &mute_output);
 
     if voice_processing.enable_advanced_ducking || voice_processing.ducking_level.as_u32() != 0 {
