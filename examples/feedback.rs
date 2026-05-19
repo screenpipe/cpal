@@ -151,6 +151,10 @@ fn main() -> anyhow::Result<()> {
         "Attempting to build both streams with f32 samples and `{:?}`.",
         config
     );
+    #[cfg(target_os = "macos")]
+    let input_stream =
+        input_device.build_input_stream(&config, input_data_fn, err_fn, None, None)?;
+    #[cfg(not(target_os = "macos"))]
     let input_stream = input_device.build_input_stream(&config, input_data_fn, err_fn, None)?;
     let output_stream = output_device.build_output_stream(&config, output_data_fn, err_fn, None)?;
     println!("Successfully built streams.");
