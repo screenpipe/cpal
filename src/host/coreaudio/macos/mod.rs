@@ -53,6 +53,8 @@ const K_AU_VOICE_IO_BYPASS_VOICE_PROCESSING: u32 = 2100;
 #[cfg(target_os = "macos")]
 const K_AU_VOICE_IO_VOICE_PROCESSING_ENABLE_AGC: u32 = 2101;
 #[cfg(target_os = "macos")]
+const K_AU_VOICE_IO_MUTE_OUTPUT: u32 = 2104;
+#[cfg(target_os = "macos")]
 const K_AU_VOICE_IO_OTHER_AUDIO_DUCKING_CONFIGURATION: u32 = 2108;
 
 #[cfg(target_os = "macos")]
@@ -695,9 +697,8 @@ impl Device {
         let scope = Scope::Output;
         let element = Element::Input;
 
-        // Potentially change the device sample rate to match the config.
-        set_sample_rate(self.audio_device_id, config.sample_rate)?;
-
+        // Do not force nominal sample rate before VoiceProcessingIO; let the unit
+        // keep the hardware rate and expose its actual input format instead.
         let mut audio_unit = build_voice_processing_audio_unit(
             self,
             config,
@@ -901,6 +902,72 @@ impl Device {
 }
 
 #[cfg(target_os = "macos")]
+fn configure_voice_processing_io(audio_unit: &mut AudioUnit) -> Result<(), coreaudio::Error> {
+    let enabled: u32 = 1;
+    let disabled: u32 = 0;
+    audio_unit.set_property(
+        kAudioOutputUnitProperty_EnableIO,
+        Scope::Input,
+        Element::Input,
+        Some(&enabled),
+    )?;
+    audio_unit.set_property(
+        kAudioOutputUnitProperty_EnableIO,
+        Scope::Output,
+        Element::Output,
+        Some(&disabled),
+    )?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn apply_voice_processing_property(
+    audio_unit: &mut AudioUnit,
+    property: u32,
+    value: &u32,
+) {
+    for element in [Element::Input, Element::Output] {
+        let _ = audio_unit.set_property(property, Scope::Global, element, Some(value));
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn apply_voice_processing_flags(
+    audio_unit: &mut AudioUnit,
+    voice_processing: &crate::MacosVoiceProcessingInputConfig,
+) {
+    let bypass = u32::from(voice_processing.voice_processing_bypass.unwrap_or(false));
+    let agc = u32::from(voice_processing.voice_processing_enable_agc.unwrap_or(false));
+    let mute_output = 0u32;
+    apply_voice_processing_property(
+        audio_unit,
+        K_AU_VOICE_IO_BYPASS_VOICE_PROCESSING,
+        &bypass,
+    );
+    apply_voice_processing_property(
+        audio_unit,
+        K_AU_VOICE_IO_VOICE_PROCESSING_ENABLE_AGC,
+        &agc,
+    );
+    apply_voice_processing_property(audio_unit, K_AU_VOICE_IO_MUTE_OUTPUT, &mute_output);
+
+    if voice_processing.enable_advanced_ducking || voice_processing.ducking_level.as_u32() != 0 {
+        let ducking = AUVoiceIOOtherAudioDuckingConfiguration {
+            m_enable_advanced_ducking: u8::from(voice_processing.enable_advanced_ducking),
+            m_ducking_level: voice_processing.ducking_level.as_u32(),
+        };
+        for element in [Element::Input, Element::Output] {
+            let _ = audio_unit.set_property(
+                K_AU_VOICE_IO_OTHER_AUDIO_DUCKING_CONFIGURATION,
+                Scope::Global,
+                element,
+                Some(&ducking),
+            );
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn build_voice_processing_audio_unit(
     device: &Device,
     config: &StreamConfig,
@@ -908,22 +975,7 @@ fn build_voice_processing_audio_unit(
     voice_processing: &crate::MacosVoiceProcessingInputConfig,
 ) -> Result<AudioUnit, coreaudio::Error> {
     let mut audio_unit = AudioUnit::new(coreaudio::audio_unit::IOType::VoiceProcessingIO)?;
-
-    let enable_input = 1u32;
-    audio_unit.set_property(
-        kAudioOutputUnitProperty_EnableIO,
-        Scope::Input,
-        Element::Input,
-        Some(&enable_input),
-    )?;
-
-    let enable_output = 1u32;
-    audio_unit.set_property(
-        kAudioOutputUnitProperty_EnableIO,
-        Scope::Output,
-        Element::Output,
-        Some(&enable_output),
-    )?;
+    configure_voice_processing_io(&mut audio_unit)?;
 
     audio_unit.set_property(
         kAudioOutputUnitProperty_CurrentDevice,
@@ -933,51 +985,15 @@ fn build_voice_processing_audio_unit(
     )?;
 
     let asbd = asbd_from_config(config, sample_format);
-    audio_unit.set_property(
+    // Some VoiceProcessingIO paths expose stream format as read-only; best-effort.
+    let _ = audio_unit.set_property(
         kAudioUnitProperty_StreamFormat,
         Scope::Output,
         Element::Input,
         Some(&asbd),
-    )?;
-    audio_unit.set_property(
-        kAudioUnitProperty_StreamFormat,
-        Scope::Input,
-        Element::Output,
-        Some(&asbd),
-    )?;
+    );
 
-    if let Some(agc_enabled) = voice_processing.voice_processing_enable_agc {
-        let agc_value: u32 = u32::from(agc_enabled);
-        audio_unit.set_property(
-            K_AU_VOICE_IO_VOICE_PROCESSING_ENABLE_AGC,
-            Scope::Global,
-            Element::Output,
-            Some(&agc_value),
-        )?;
-    }
-
-    if let Some(bypass_enabled) = voice_processing.voice_processing_bypass {
-        let bypass: u32 = u32::from(bypass_enabled);
-        audio_unit.set_property(
-            K_AU_VOICE_IO_BYPASS_VOICE_PROCESSING,
-            Scope::Global,
-            Element::Output,
-            Some(&bypass),
-        )?;
-    }
-
-    if voice_processing.enable_advanced_ducking || voice_processing.ducking_level.as_u32() != 0 {
-        let ducking = AUVoiceIOOtherAudioDuckingConfiguration {
-            m_enable_advanced_ducking: u8::from(voice_processing.enable_advanced_ducking),
-            m_ducking_level: voice_processing.ducking_level.as_u32(),
-        };
-        audio_unit.set_property(
-            K_AU_VOICE_IO_OTHER_AUDIO_DUCKING_CONFIGURATION,
-            Scope::Global,
-            Element::Output,
-            Some(&ducking),
-        )?;
-    }
+    apply_voice_processing_flags(&mut audio_unit, voice_processing);
 
     Ok(audio_unit)
 }

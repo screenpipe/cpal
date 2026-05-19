@@ -317,6 +317,20 @@ pub struct MacosVoiceProcessingInputConfig {
     pub ducking_level: DuckingLevel,
 }
 
+#[cfg(target_os = "macos")]
+impl MacosVoiceProcessingInputConfig {
+    /// Screenpipe defaults: processing on, AGC off, bypass off, output muted, light ducking.
+    pub fn screenpipe_aec() -> Self {
+        Self {
+            enable_voice_processing: true,
+            voice_processing_enable_agc: Some(false),
+            voice_processing_bypass: Some(false),
+            enable_advanced_ducking: false,
+            ducking_level: DuckingLevel::Min,
+        }
+    }
+}
+
 /// Describes the minimum and maximum supported buffer size for the device
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SupportedBufferSize {
