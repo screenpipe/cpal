@@ -965,7 +965,7 @@ fn build_voice_processing_audio_unit(
     config: &StreamConfig,
     sample_format: SampleFormat,
     voice_processing: &crate::MacosVoiceProcessingInputConfig,
-) -> Result<AudioUnit, coreaudio::Error> {
+) -> Result<AudioUnit, BuildStreamError> {
     let mut audio_unit = AudioUnit::new(coreaudio::audio_unit::IOType::VoiceProcessingIO)?;
     configure_voice_processing_io(&mut audio_unit)?;
 
@@ -977,17 +977,52 @@ fn build_voice_processing_audio_unit(
     )?;
 
     let asbd = asbd_from_config(config, sample_format);
-    // Some VoiceProcessingIO paths expose stream format as read-only; best-effort.
-    let _ = audio_unit.set_property(
-        kAudioUnitProperty_StreamFormat,
-        Scope::Output,
-        Element::Input,
-        Some(&asbd),
-    );
+    configure_voice_processing_stream_format(&mut audio_unit, &asbd)?;
 
     apply_voice_processing_flags(&mut audio_unit, voice_processing);
 
     Ok(audio_unit)
+}
+
+#[cfg(target_os = "macos")]
+fn configure_voice_processing_stream_format(
+    audio_unit: &mut AudioUnit,
+    requested: &AudioStreamBasicDescription,
+) -> Result<(), BuildStreamError> {
+    let set_result = audio_unit.set_property(
+        kAudioUnitProperty_StreamFormat,
+        Scope::Output,
+        Element::Input,
+        Some(requested),
+    );
+    let actual = audio_unit
+        .get_property::<AudioStreamBasicDescription>(
+            kAudioUnitProperty_StreamFormat,
+            Scope::Output,
+            Element::Input,
+        )
+        .ok();
+
+    if let Some(actual) = actual {
+        let sample_rate_matches = (actual.mSampleRate - requested.mSampleRate).abs() < 1.0;
+        let channels_match = actual.mChannelsPerFrame == requested.mChannelsPerFrame;
+
+        if sample_rate_matches && channels_match {
+            return Ok(());
+        }
+
+        eprintln!(
+            "screenpipe/cpal: VoiceProcessingIO format mismatch — requested {:.1} Hz × {} ch, \
+             unit accepted {:.1} Hz × {} ch",
+            requested.mSampleRate,
+            requested.mChannelsPerFrame,
+            actual.mSampleRate,
+            actual.mChannelsPerFrame,
+        );
+        return Err(BuildStreamError::StreamConfigNotSupported);
+    }
+
+    set_result.map_err(Into::into)
 }
 
 #[cfg(target_os = "macos")]
@@ -1126,13 +1161,27 @@ fn set_sample_rate(
         let ranges: *mut AudioValueRange = ranges.as_mut_ptr() as *mut _;
         let ranges: &'static [AudioValueRange] = unsafe { slice::from_raw_parts(ranges, n_ranges) };
 
-        // Now that we have the available ranges, pick the one matching the desired rate.
+        // Pick the first range that contains the desired rate. Devices that report
+        // discrete points have mMinimum == mMaximum; continuous-range devices
+        // (USB interfaces, virtual drivers like BlackHole/Loopback) have
+        // mMinimum < mMaximum. Both cases are covered by containment.
         let sample_rate = target_sample_rate.0;
         let maybe_index = ranges
             .iter()
-            .position(|r| r.mMinimum as u32 == sample_rate && r.mMaximum as u32 == sample_rate);
+            .position(|r| r.mMinimum as u32 <= sample_rate && sample_rate <= r.mMaximum as u32);
         let range_index = match maybe_index {
-            None => return Err(BuildStreamError::StreamConfigNotSupported),
+            None => {
+                eprintln!(
+                    "screenpipe/cpal: set_sample_rate — {} Hz not in any available range; \
+                     ranges: {:?}",
+                    sample_rate,
+                    ranges
+                        .iter()
+                        .map(|r| format!("{:.0}–{:.0}", r.mMinimum, r.mMaximum))
+                        .collect::<Vec<_>>(),
+                );
+                return Err(BuildStreamError::StreamConfigNotSupported);
+            }
             Some(i) => i,
         };
 
@@ -1167,7 +1216,11 @@ fn set_sample_rate(
             sample_rate_handler,
         )?;
 
-        // Finally, set the sample rate.
+        // Finally, set the sample rate. Pass the target as a bare f64 — the device
+        // expects sizeof(Float64) bytes for kAudioDevicePropertyNominalSampleRate,
+        // not the AudioValueRange struct we used for the lookup.
+        let target_rate_f64: f64 = target_sample_rate.0 as f64;
+        let _ = range_index; // consumed by lookup; only needed to confirm support
         property_address.mSelector = kAudioDevicePropertyNominalSampleRate;
         let status = unsafe {
             AudioObjectSetPropertyData(
@@ -1175,8 +1228,8 @@ fn set_sample_rate(
                 &property_address as *const _,
                 0,
                 null(),
-                data_size,
-                &ranges[range_index] as *const _ as *const _,
+                mem::size_of::<f64>() as u32,
+                &target_rate_f64 as *const _ as *const _,
             )
         };
         coreaudio::Error::from_os_status(status)?;
