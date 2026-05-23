@@ -1,7 +1,7 @@
-//! Records a WAV file using the default input device with Screenpipe's Windows WASAPI AEC enabled.
+//! Records a WAV file using the default input device with echo cancellation requested.
 //!
-//! AEC is requested only on Windows WASAPI input streams. Unsupported devices continue recording
-//! normally without echo cancellation.
+//! On Windows, sets `StreamConfig.windows_input_aec`. On macOS, passes
+//! `MacosVoiceProcessingInputConfig::screenpipe_aec()`. Other platforms record normally.
 
 use clap::Parser;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -13,7 +13,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[derive(Parser, Debug)]
-#[command(version, about = "Record a WAV file with Windows WASAPI AEC requested")]
+#[command(
+    version,
+    about = "Record a WAV file with platform AEC requested when available"
+)]
 struct Opt {
     /// The audio input device to use.
     #[arg(short, long, default_value_t = String::from("default"))]
@@ -31,8 +34,8 @@ struct Opt {
 fn main() -> Result<(), anyhow::Error> {
     let opt = Opt::parse();
 
-    #[cfg(not(target_os = "windows"))]
-    eprintln!("AEC is only requested by the Windows WASAPI backend; recording normally here.");
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    eprintln!("AEC is only requested on Windows WASAPI and macOS VoiceProcessingIO; recording normally here.");
 
     let host = cpal::default_host();
     let device = if opt.device == "default" {
@@ -62,30 +65,18 @@ fn main() -> Result<(), anyhow::Error> {
     let stream_config = aec_stream_config(&config);
 
     let stream = match config.sample_format() {
-        cpal::SampleFormat::I8 => device.build_input_stream(
-            &stream_config,
-            move |data, _: &_| write_input_data::<i8, i8>(data, &writer_2),
-            err_fn,
-            None,
-        )?,
-        cpal::SampleFormat::I16 => device.build_input_stream(
-            &stream_config,
-            move |data, _: &_| write_input_data::<i16, i16>(data, &writer_2),
-            err_fn,
-            None,
-        )?,
-        cpal::SampleFormat::I32 => device.build_input_stream(
-            &stream_config,
-            move |data, _: &_| write_input_data::<i32, i32>(data, &writer_2),
-            err_fn,
-            None,
-        )?,
-        cpal::SampleFormat::F32 => device.build_input_stream(
-            &stream_config,
-            move |data, _: &_| write_input_data::<f32, f32>(data, &writer_2),
-            err_fn,
-            None,
-        )?,
+        cpal::SampleFormat::I8 => {
+            build_aec_recording_stream::<i8, i8>(&device, &stream_config, writer_2, err_fn)?
+        }
+        cpal::SampleFormat::I16 => {
+            build_aec_recording_stream::<i16, i16>(&device, &stream_config, writer_2, err_fn)?
+        }
+        cpal::SampleFormat::I32 => {
+            build_aec_recording_stream::<i32, i32>(&device, &stream_config, writer_2, err_fn)?
+        }
+        cpal::SampleFormat::F32 => {
+            build_aec_recording_stream::<f32, f32>(&device, &stream_config, writer_2, err_fn)?
+        }
         sample_format => {
             return Err(anyhow::anyhow!(
                 "unsupported sample format '{sample_format}'"
@@ -109,12 +100,16 @@ fn main() -> Result<(), anyhow::Error> {
 }
 
 fn aec_stream_config(config: &cpal::SupportedStreamConfig) -> cpal::StreamConfig {
-    let mut stream_config = config.config();
     #[cfg(target_os = "windows")]
     {
+        let mut stream_config = config.config();
         stream_config.windows_input_aec = true;
+        stream_config
     }
-    stream_config
+    #[cfg(not(target_os = "windows"))]
+    {
+        config.config()
+    }
 }
 
 fn sample_format(format: cpal::SampleFormat) -> hound::SampleFormat {
@@ -135,6 +130,37 @@ fn wav_spec_from_config(config: &cpal::SupportedStreamConfig) -> hound::WavSpec 
 }
 
 type WavWriterHandle = Arc<Mutex<Option<hound::WavWriter<BufWriter<File>>>>>;
+
+fn build_aec_recording_stream<T, U>(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    writer: WavWriterHandle,
+    err_fn: impl FnMut(cpal::StreamError) + Send + 'static,
+) -> Result<cpal::Stream, cpal::BuildStreamError>
+where
+    T: Sample + cpal::SizedSample,
+    U: Sample + hound::Sample + FromSample<T>,
+{
+    #[cfg(target_os = "macos")]
+    {
+        device.build_input_stream(
+            config,
+            move |data: &[T], _: &cpal::InputCallbackInfo| write_input_data::<T, U>(data, &writer),
+            err_fn,
+            None,
+            Some(cpal::MacosVoiceProcessingInputConfig::screenpipe_aec()),
+        )
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        device.build_input_stream(
+            config,
+            move |data: &[T], _: &cpal::InputCallbackInfo| write_input_data::<T, U>(data, &writer),
+            err_fn,
+            None,
+        )
+    }
+}
 
 fn write_input_data<T, U>(input: &[T], writer: &WavWriterHandle)
 where

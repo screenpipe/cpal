@@ -53,6 +53,8 @@ const K_AU_VOICE_IO_BYPASS_VOICE_PROCESSING: u32 = 2100;
 #[cfg(target_os = "macos")]
 const K_AU_VOICE_IO_VOICE_PROCESSING_ENABLE_AGC: u32 = 2101;
 #[cfg(target_os = "macos")]
+const K_AU_VOICE_IO_MUTE_OUTPUT: u32 = 2104;
+#[cfg(target_os = "macos")]
 const K_AU_VOICE_IO_OTHER_AUDIO_DUCKING_CONFIGURATION: u32 = 2108;
 
 #[cfg(target_os = "macos")]
@@ -695,9 +697,8 @@ impl Device {
         let scope = Scope::Output;
         let element = Element::Input;
 
-        // Potentially change the device sample rate to match the config.
-        set_sample_rate(self.audio_device_id, config.sample_rate)?;
-
+        // Do not force nominal sample rate before VoiceProcessingIO; let the unit
+        // keep the hardware rate and expose its actual input format instead.
         let mut audio_unit = build_voice_processing_audio_unit(
             self,
             config,
@@ -901,29 +902,72 @@ impl Device {
 }
 
 #[cfg(target_os = "macos")]
+fn configure_voice_processing_io(audio_unit: &mut AudioUnit) -> Result<(), coreaudio::Error> {
+    let enabled: u32 = 1;
+    let disabled: u32 = 0;
+    audio_unit.set_property(
+        kAudioOutputUnitProperty_EnableIO,
+        Scope::Input,
+        Element::Input,
+        Some(&enabled),
+    )?;
+    audio_unit.set_property(
+        kAudioOutputUnitProperty_EnableIO,
+        Scope::Output,
+        Element::Output,
+        Some(&disabled),
+    )?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn apply_voice_processing_property(audio_unit: &mut AudioUnit, property: u32, value: &u32) {
+    for element in [Element::Input, Element::Output] {
+        let _ = audio_unit.set_property(property, Scope::Global, element, Some(value));
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn apply_voice_processing_flags(
+    audio_unit: &mut AudioUnit,
+    voice_processing: &crate::MacosVoiceProcessingInputConfig,
+) {
+    let bypass = u32::from(voice_processing.voice_processing_bypass.unwrap_or(false));
+    let agc = u32::from(
+        voice_processing
+            .voice_processing_enable_agc
+            .unwrap_or(false),
+    );
+    let mute_output = 0u32;
+    apply_voice_processing_property(audio_unit, K_AU_VOICE_IO_BYPASS_VOICE_PROCESSING, &bypass);
+    apply_voice_processing_property(audio_unit, K_AU_VOICE_IO_VOICE_PROCESSING_ENABLE_AGC, &agc);
+    apply_voice_processing_property(audio_unit, K_AU_VOICE_IO_MUTE_OUTPUT, &mute_output);
+
+    if voice_processing.enable_advanced_ducking || voice_processing.ducking_level.as_u32() != 0 {
+        let ducking = AUVoiceIOOtherAudioDuckingConfiguration {
+            m_enable_advanced_ducking: u8::from(voice_processing.enable_advanced_ducking),
+            m_ducking_level: voice_processing.ducking_level.as_u32(),
+        };
+        for element in [Element::Input, Element::Output] {
+            let _ = audio_unit.set_property(
+                K_AU_VOICE_IO_OTHER_AUDIO_DUCKING_CONFIGURATION,
+                Scope::Global,
+                element,
+                Some(&ducking),
+            );
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
 fn build_voice_processing_audio_unit(
     device: &Device,
     config: &StreamConfig,
     sample_format: SampleFormat,
     voice_processing: &crate::MacosVoiceProcessingInputConfig,
-) -> Result<AudioUnit, coreaudio::Error> {
+) -> Result<AudioUnit, BuildStreamError> {
     let mut audio_unit = AudioUnit::new(coreaudio::audio_unit::IOType::VoiceProcessingIO)?;
-
-    let enable_input = 1u32;
-    audio_unit.set_property(
-        kAudioOutputUnitProperty_EnableIO,
-        Scope::Input,
-        Element::Input,
-        Some(&enable_input),
-    )?;
-
-    let enable_output = 1u32;
-    audio_unit.set_property(
-        kAudioOutputUnitProperty_EnableIO,
-        Scope::Output,
-        Element::Output,
-        Some(&enable_output),
-    )?;
+    configure_voice_processing_io(&mut audio_unit)?;
 
     audio_unit.set_property(
         kAudioOutputUnitProperty_CurrentDevice,
@@ -933,53 +977,52 @@ fn build_voice_processing_audio_unit(
     )?;
 
     let asbd = asbd_from_config(config, sample_format);
-    audio_unit.set_property(
+    configure_voice_processing_stream_format(&mut audio_unit, &asbd)?;
+
+    apply_voice_processing_flags(&mut audio_unit, voice_processing);
+
+    Ok(audio_unit)
+}
+
+#[cfg(target_os = "macos")]
+fn configure_voice_processing_stream_format(
+    audio_unit: &mut AudioUnit,
+    requested: &AudioStreamBasicDescription,
+) -> Result<(), BuildStreamError> {
+    let set_result = audio_unit.set_property(
         kAudioUnitProperty_StreamFormat,
         Scope::Output,
         Element::Input,
-        Some(&asbd),
-    )?;
-    audio_unit.set_property(
-        kAudioUnitProperty_StreamFormat,
-        Scope::Input,
-        Element::Output,
-        Some(&asbd),
-    )?;
+        Some(requested),
+    );
+    let actual = audio_unit
+        .get_property::<AudioStreamBasicDescription>(
+            kAudioUnitProperty_StreamFormat,
+            Scope::Output,
+            Element::Input,
+        )
+        .ok();
 
-    if let Some(agc_enabled) = voice_processing.voice_processing_enable_agc {
-        let agc_value: u32 = u32::from(agc_enabled);
-        audio_unit.set_property(
-            K_AU_VOICE_IO_VOICE_PROCESSING_ENABLE_AGC,
-            Scope::Global,
-            Element::Output,
-            Some(&agc_value),
-        )?;
+    if let Some(actual) = actual {
+        let sample_rate_matches = (actual.mSampleRate - requested.mSampleRate).abs() < 1.0;
+        let channels_match = actual.mChannelsPerFrame == requested.mChannelsPerFrame;
+
+        if sample_rate_matches && channels_match {
+            return Ok(());
+        }
+
+        eprintln!(
+            "screenpipe/cpal: VoiceProcessingIO format mismatch — requested {:.1} Hz × {} ch, \
+             unit accepted {:.1} Hz × {} ch",
+            requested.mSampleRate,
+            requested.mChannelsPerFrame,
+            actual.mSampleRate,
+            actual.mChannelsPerFrame,
+        );
+        return Err(BuildStreamError::StreamConfigNotSupported);
     }
 
-    if let Some(bypass_enabled) = voice_processing.voice_processing_bypass {
-        let bypass: u32 = u32::from(bypass_enabled);
-        audio_unit.set_property(
-            K_AU_VOICE_IO_BYPASS_VOICE_PROCESSING,
-            Scope::Global,
-            Element::Output,
-            Some(&bypass),
-        )?;
-    }
-
-    if voice_processing.enable_advanced_ducking || voice_processing.ducking_level.as_u32() != 0 {
-        let ducking = AUVoiceIOOtherAudioDuckingConfiguration {
-            m_enable_advanced_ducking: u8::from(voice_processing.enable_advanced_ducking),
-            m_ducking_level: voice_processing.ducking_level.as_u32(),
-        };
-        audio_unit.set_property(
-            K_AU_VOICE_IO_OTHER_AUDIO_DUCKING_CONFIGURATION,
-            Scope::Global,
-            Element::Output,
-            Some(&ducking),
-        )?;
-    }
-
-    Ok(audio_unit)
+    set_result.map_err(Into::into)
 }
 
 #[cfg(target_os = "macos")]
@@ -1118,13 +1161,27 @@ fn set_sample_rate(
         let ranges: *mut AudioValueRange = ranges.as_mut_ptr() as *mut _;
         let ranges: &'static [AudioValueRange] = unsafe { slice::from_raw_parts(ranges, n_ranges) };
 
-        // Now that we have the available ranges, pick the one matching the desired rate.
+        // Pick the first range that contains the desired rate. Devices that report
+        // discrete points have mMinimum == mMaximum; continuous-range devices
+        // (USB interfaces, virtual drivers like BlackHole/Loopback) have
+        // mMinimum < mMaximum. Both cases are covered by containment.
         let sample_rate = target_sample_rate.0;
         let maybe_index = ranges
             .iter()
-            .position(|r| r.mMinimum as u32 == sample_rate && r.mMaximum as u32 == sample_rate);
+            .position(|r| r.mMinimum as u32 <= sample_rate && sample_rate <= r.mMaximum as u32);
         let range_index = match maybe_index {
-            None => return Err(BuildStreamError::StreamConfigNotSupported),
+            None => {
+                eprintln!(
+                    "screenpipe/cpal: set_sample_rate — {} Hz not in any available range; \
+                     ranges: {:?}",
+                    sample_rate,
+                    ranges
+                        .iter()
+                        .map(|r| format!("{:.0}–{:.0}", r.mMinimum, r.mMaximum))
+                        .collect::<Vec<_>>(),
+                );
+                return Err(BuildStreamError::StreamConfigNotSupported);
+            }
             Some(i) => i,
         };
 
@@ -1159,7 +1216,11 @@ fn set_sample_rate(
             sample_rate_handler,
         )?;
 
-        // Finally, set the sample rate.
+        // Finally, set the sample rate. Pass the target as a bare f64 — the device
+        // expects sizeof(Float64) bytes for kAudioDevicePropertyNominalSampleRate,
+        // not the AudioValueRange struct we used for the lookup.
+        let target_rate_f64: f64 = target_sample_rate.0 as f64;
+        let _ = range_index; // consumed by lookup; only needed to confirm support
         property_address.mSelector = kAudioDevicePropertyNominalSampleRate;
         let status = unsafe {
             AudioObjectSetPropertyData(
@@ -1167,8 +1228,8 @@ fn set_sample_rate(
                 &property_address as *const _,
                 0,
                 null(),
-                data_size,
-                &ranges[range_index] as *const _ as *const _,
+                mem::size_of::<f64>() as u32,
+                &target_rate_f64 as *const _ as *const _,
             )
         };
         coreaudio::Error::from_os_status(status)?;

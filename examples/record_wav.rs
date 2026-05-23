@@ -100,31 +100,20 @@ fn main() -> Result<(), anyhow::Error> {
         eprintln!("an error occurred on stream: {}", err);
     };
 
+    let stream_config = config.config();
     let stream = match config.sample_format() {
-        cpal::SampleFormat::I8 => device.build_input_stream(
-            &config.into(),
-            move |data, _: &_| write_input_data::<i8, i8>(data, &writer_2),
-            err_fn,
-            None,
-        )?,
-        cpal::SampleFormat::I16 => device.build_input_stream(
-            &config.into(),
-            move |data, _: &_| write_input_data::<i16, i16>(data, &writer_2),
-            err_fn,
-            None,
-        )?,
-        cpal::SampleFormat::I32 => device.build_input_stream(
-            &config.into(),
-            move |data, _: &_| write_input_data::<i32, i32>(data, &writer_2),
-            err_fn,
-            None,
-        )?,
-        cpal::SampleFormat::F32 => device.build_input_stream(
-            &config.into(),
-            move |data, _: &_| write_input_data::<f32, f32>(data, &writer_2),
-            err_fn,
-            None,
-        )?,
+        cpal::SampleFormat::I8 => {
+            build_recording_stream::<i8, i8>(&device, &stream_config, writer_2, err_fn)?
+        }
+        cpal::SampleFormat::I16 => {
+            build_recording_stream::<i16, i16>(&device, &stream_config, writer_2, err_fn)?
+        }
+        cpal::SampleFormat::I32 => {
+            build_recording_stream::<i32, i32>(&device, &stream_config, writer_2, err_fn)?
+        }
+        cpal::SampleFormat::F32 => {
+            build_recording_stream::<f32, f32>(&device, &stream_config, writer_2, err_fn)?
+        }
         sample_format => {
             return Err(anyhow::Error::msg(format!(
                 "Unsupported sample format '{sample_format}'"
@@ -160,6 +149,37 @@ fn wav_spec_from_config(config: &cpal::SupportedStreamConfig) -> hound::WavSpec 
 }
 
 type WavWriterHandle = Arc<Mutex<Option<hound::WavWriter<BufWriter<File>>>>>;
+
+fn build_recording_stream<T, U>(
+    device: &cpal::Device,
+    config: &cpal::StreamConfig,
+    writer: WavWriterHandle,
+    err_fn: impl FnMut(cpal::StreamError) + Send + 'static,
+) -> Result<cpal::Stream, cpal::BuildStreamError>
+where
+    T: Sample + cpal::SizedSample,
+    U: Sample + hound::Sample + FromSample<T>,
+{
+    #[cfg(target_os = "macos")]
+    {
+        device.build_input_stream(
+            config,
+            move |data: &[T], _: &cpal::InputCallbackInfo| write_input_data::<T, U>(data, &writer),
+            err_fn,
+            None,
+            None,
+        )
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        device.build_input_stream(
+            config,
+            move |data: &[T], _: &cpal::InputCallbackInfo| write_input_data::<T, U>(data, &writer),
+            err_fn,
+            None,
+        )
+    }
+}
 
 fn write_input_data<T, U>(input: &[T], writer: &WavWriterHandle)
 where
