@@ -53,7 +53,7 @@ mach2 = "0.4" # For access to mach_timebase type.
 
 [target.'cfg(target_os = "macos")'.dependencies]
 coreaudio-rs = { version = "0.11", default-features = false, features = ["audio_unit", "core_audio"] }
-cidre = { git = "https://github.com/yury/cidre.git", features = ["sc", "cm", "dispatch", "blocks"] }
+cidre = { git = "https://github.com/yury/cidre.git", rev = "8481f3f0dc7dd39bb5be80d9424bfac0cad3801a", features = ["sc", "cm", "dispatch", "blocks"] }
 
 [target.'cfg(target_os = "ios")'.dependencies]
 coreaudio-rs = { version = "0.11", default-features = false, features = ["audio_unit", "core_audio", "audio_toolbox"] }
