@@ -217,6 +217,13 @@ impl Device {
         let mut cfg = sc::StreamCfg::new();
         cfg.set_captures_audio(true);
         cfg.set_excludes_current_process_audio(false);
+        // ScreenCaptureKit display-backed audio streams still produce screen
+        // samples. If no screen output is registered, macOS logs
+        // "stream output NOT found. Dropping frame" at display refresh rate.
+        // Keep a tiny 1fps screen sink attached and ignore its frames.
+        cfg.set_width(2);
+        cfg.set_height(2);
+        cfg.set_minimum_frame_interval(cm::Time::new(1, 1));
         let windows = ns::Array::new();
         let filter = sc::ContentFilter::with_display_excluding_windows(&self.display, &windows);
         let sc_stream = sc::Stream::new(&filter, &cfg);
@@ -233,9 +240,20 @@ impl Device {
             .map_err(|e| BackendSpecificError {
                 description: format!("{e}"),
             })?;
+        let screen_discarder = ScreenFrameDiscarder::with(ScreenFrameDiscarderInner {});
+        sc_stream
+            .add_stream_output(
+                screen_discarder.as_ref(),
+                sc::OutputType::Screen,
+                Some(&queue),
+            )
+            .map_err(|e| BackendSpecificError {
+                description: format!("{e}"),
+            })?;
 
         Ok(Stream::new(StreamInner {
             _capturer: capturer,
+            _screen_discarder: screen_discarder,
             sc_stream,
             playing: false,
         }))
@@ -260,8 +278,36 @@ impl Device {
 struct StreamInner {
     // Keep capturer alive
     _capturer: Retained<Capturer>,
+    // Keep the dummy screen output alive to silence SCK's frame-drop spam.
+    _screen_discarder: Retained<ScreenFrameDiscarder>,
     sc_stream: Retained<sc::Stream>,
     playing: bool,
+}
+
+impl Drop for StreamInner {
+    fn drop(&mut self) {
+        if self.playing {
+            let (tx, rx) = std::sync::mpsc::channel();
+            self.sc_stream.stop_with_ch(move |e| {
+                let res = if let Some(e) = e {
+                    Result::Err(BackendSpecificError {
+                        description: format!("{e}"),
+                    })
+                } else {
+                    Result::Ok(())
+                };
+                let _ = tx.send(res);
+            });
+            let _ = rx.recv_timeout(Duration::from_secs(2));
+            self.playing = false;
+        }
+        let _ = self
+            .sc_stream
+            .remove_stream_output(self._capturer.as_ref(), sc::OutputType::Audio);
+        let _ = self
+            .sc_stream
+            .remove_stream_output(self._screen_discarder.as_ref(), sc::OutputType::Screen);
+    }
 }
 
 #[derive(Clone)]
@@ -397,6 +443,29 @@ impl StreamOutputImpl for Capturer {
             sc::OutputType::Audio => self.inner_mut().handle_audio(sample_buf),
             _ => {}
         }
+    }
+}
+
+#[repr(C)]
+struct ScreenFrameDiscarderInner {}
+
+define_obj_type!(
+    ScreenFrameDiscarder + StreamOutputImpl,
+    ScreenFrameDiscarderInner,
+    SCREEN_FRAME_DISCARDER
+);
+
+impl StreamOutput for ScreenFrameDiscarder {}
+
+#[objc::add_methods]
+impl StreamOutputImpl for ScreenFrameDiscarder {
+    extern "C" fn impl_stream_did_output_sample_buf(
+        &mut self,
+        _cmd: Option<&cidre::objc::Sel>,
+        _stream: &sc::Stream,
+        _sample_buf: &mut cm::SampleBuf,
+        _kind: sc::OutputType,
+    ) {
     }
 }
 
