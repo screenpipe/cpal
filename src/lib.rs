@@ -302,8 +302,21 @@ impl DuckingLevel {
     }
 }
 
+/// Shared far-end (downlink) reference for VoiceProcessingIO's echo canceller.
+///
+/// Apple's VPIO cancels echo by subtracting whatever the app renders through
+/// the unit's own output element. screenpipe doesn't play the far-end (other
+/// apps do), so we capture the system-audio lane and feed it here: the engine
+/// pushes mono f32 samples at the unit's input sample rate, and VPIO's realtime
+/// render callback drains them into the (muted) output element as the AEC
+/// reference. The ring is intentionally simple; the render callback uses
+/// `try_lock` and zero-fills on contention/underflow, so a missed lock costs a
+/// little un-cancelled echo, never an audio glitch.
 #[cfg(target_os = "macos")]
-#[derive(Clone, Copy, Debug, Default)]
+pub type AecReference = std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<f32>>>;
+
+#[cfg(target_os = "macos")]
+#[derive(Clone, Debug, Default)]
 pub struct MacosVoiceProcessingInputConfig {
     /// Enable or disable Apple AEC processing in VoiceProcessingIO.
     pub enable_voice_processing: bool,
@@ -315,6 +328,11 @@ pub struct MacosVoiceProcessingInputConfig {
     pub enable_advanced_ducking: bool,
     /// Ducking level for non-voice audio.
     pub ducking_level: DuckingLevel,
+    /// When set, VPIO's output element is enabled and muted, and this ring is
+    /// rendered into it as the AEC far-end reference — the missing downlink
+    /// that makes VPIO's echo cancellation actually do anything (see
+    /// [`AecReference`]). `None` keeps the historical input-only behavior.
+    pub aec_reference: Option<AecReference>,
 }
 
 #[cfg(target_os = "macos")]
@@ -327,7 +345,15 @@ impl MacosVoiceProcessingInputConfig {
             voice_processing_bypass: Some(false),
             enable_advanced_ducking: false,
             ducking_level: DuckingLevel::Min,
+            aec_reference: None,
         }
+    }
+
+    /// Attach the far-end reference ring so VPIO's echo canceller has a downlink
+    /// to subtract (see [`AecReference`]). Without it VPIO removes 0 dB.
+    pub fn with_aec_reference(mut self, reference: AecReference) -> Self {
+        self.aec_reference = Some(reference);
+        self
     }
 }
 
