@@ -699,12 +699,37 @@ impl Device {
 
         // Do not force nominal sample rate before VoiceProcessingIO; let the unit
         // keep the hardware rate and expose its actual input format instead.
-        let mut audio_unit = build_voice_processing_audio_unit(
-            self,
-            config,
-            sample_format,
-            &use_voice_processing_input_config.expect("voice processing config is required"),
-        )?;
+        let vp_config =
+            use_voice_processing_input_config.expect("voice processing config is required");
+        let aec_reference = vp_config.aec_reference.clone();
+        let mut audio_unit = build_voice_processing_audio_unit(self, config, sample_format, &vp_config)?;
+
+        // VoiceProcessingIO AEC reference: render the captured system-audio lane
+        // into the (enabled, muted) output element so Apple's canceller has a
+        // downlink to subtract from the mic. `build_voice_processing_audio_unit`
+        // forced that element to mono f32, so we write straight through.
+        // Realtime-safe: `try_lock` + zero-fill, never blocks or allocates.
+        if let Some(reference) = aec_reference {
+            type RefArgs = render_callback::Args<data::Raw>;
+            audio_unit.set_render_callback(move |args: RefArgs| unsafe {
+                let AudioBuffer {
+                    mDataByteSize: data_byte_size,
+                    mData: data,
+                    ..
+                } = (*args.data.data).mBuffers[0];
+                let frames = data_byte_size as usize / mem::size_of::<f32>();
+                let out = slice::from_raw_parts_mut(data as *mut f32, frames);
+                match reference.try_lock() {
+                    Ok(mut ring) => {
+                        for sample in out.iter_mut() {
+                            *sample = ring.pop_front().unwrap_or(0.0);
+                        }
+                    }
+                    Err(_) => out.iter_mut().for_each(|s| *s = 0.0),
+                }
+                Ok(())
+            })?;
+        }
 
         // Set the stream in interleaved mode.
         let asbd = asbd_from_config(config, sample_format);
@@ -902,7 +927,10 @@ impl Device {
 }
 
 #[cfg(target_os = "macos")]
-fn configure_voice_processing_io(audio_unit: &mut AudioUnit) -> Result<(), coreaudio::Error> {
+fn configure_voice_processing_io(
+    audio_unit: &mut AudioUnit,
+    enable_output: bool,
+) -> Result<(), coreaudio::Error> {
     let enabled: u32 = 1;
     let disabled: u32 = 0;
     audio_unit.set_property(
@@ -911,11 +939,15 @@ fn configure_voice_processing_io(audio_unit: &mut AudioUnit) -> Result<(), corea
         Element::Input,
         Some(&enabled),
     )?;
+    // The output (downlink) element stays disabled unless we have a far-end
+    // reference to render into it. Enabling it without rendering anything is
+    // the historical 0 dB no-op (the render is silence, #3938); enabling it AND
+    // feeding the system-audio reference is what lets VPIO's AEC subtract echo.
     audio_unit.set_property(
         kAudioOutputUnitProperty_EnableIO,
         Scope::Output,
         Element::Output,
-        Some(&disabled),
+        Some(if enable_output { &enabled } else { &disabled }),
     )?;
     Ok(())
 }
@@ -938,7 +970,9 @@ fn apply_voice_processing_flags(
             .voice_processing_enable_agc
             .unwrap_or(false),
     );
-    let mute_output = 0u32;
+    // Mute the output element when we render a far-end reference into it, so the
+    // reference is used for AEC only and never replayed to the speakers.
+    let mute_output = u32::from(voice_processing.aec_reference.is_some());
     apply_voice_processing_property(audio_unit, K_AU_VOICE_IO_BYPASS_VOICE_PROCESSING, &bypass);
     apply_voice_processing_property(audio_unit, K_AU_VOICE_IO_VOICE_PROCESSING_ENABLE_AGC, &agc);
     apply_voice_processing_property(audio_unit, K_AU_VOICE_IO_MUTE_OUTPUT, &mute_output);
@@ -967,7 +1001,8 @@ fn build_voice_processing_audio_unit(
     voice_processing: &crate::MacosVoiceProcessingInputConfig,
 ) -> Result<AudioUnit, BuildStreamError> {
     let mut audio_unit = AudioUnit::new(coreaudio::audio_unit::IOType::VoiceProcessingIO)?;
-    configure_voice_processing_io(&mut audio_unit)?;
+    let has_reference = voice_processing.aec_reference.is_some();
+    configure_voice_processing_io(&mut audio_unit, has_reference)?;
 
     audio_unit.set_property(
         kAudioOutputUnitProperty_CurrentDevice,
@@ -978,6 +1013,21 @@ fn build_voice_processing_audio_unit(
 
     let asbd = asbd_from_config(config, sample_format);
     configure_voice_processing_stream_format(&mut audio_unit, &asbd)?;
+
+    // When feeding a reference, the app supplies the downlink on the *input
+    // scope of the output element*. Force it to mono f32 so the render callback
+    // can write the reference straight through without per-channel conversion.
+    if has_reference {
+        let mut mono = config.clone();
+        mono.channels = 1;
+        let ref_asbd = asbd_from_config(&mono, SampleFormat::F32);
+        audio_unit.set_property(
+            kAudioUnitProperty_StreamFormat,
+            Scope::Input,
+            Element::Output,
+            Some(&ref_asbd),
+        )?;
+    }
 
     apply_voice_processing_flags(&mut audio_unit, voice_processing);
 
