@@ -9,7 +9,6 @@ use std::ptr;
 use std::sync::mpsc::{channel, Receiver, SendError, Sender};
 use std::thread::{self, JoinHandle};
 use windows::Win32::Foundation;
-use windows::Win32::Foundation::HANDLE;
 use windows::Win32::Foundation::WAIT_OBJECT_0;
 use windows::Win32::Media::Audio;
 use windows::Win32::System::SystemServices;
@@ -324,10 +323,12 @@ fn run_output(
 
 fn boost_current_thread_priority() {
     unsafe {
-        let thread_id = Threading::GetCurrentThreadId();
-
+        // `GetCurrentThread()` returns a pseudo-handle valid for `SetThreadPriority`.
+        // The previous code passed `GetCurrentThreadId()` (a thread id, not a handle)
+        // cast into a `HANDLE`, so `SetThreadPriority` always failed with
+        // `ERROR_INVALID_HANDLE` and the boost silently never applied.
         let _ = Threading::SetThreadPriority(
-            HANDLE(thread_id as isize),
+            Threading::GetCurrentThread(),
             Threading::THREAD_PRIORITY_TIME_CRITICAL,
         );
     }
