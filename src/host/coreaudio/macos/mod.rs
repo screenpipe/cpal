@@ -66,6 +66,8 @@ struct AUVoiceIOOtherAudioDuckingConfiguration {
 }
 
 pub mod enumerate;
+mod vpio;
+use vpio::VoiceProcessingUnit;
 mod property_listener;
 
 /// Coreaudio host, the default host on macOS.
@@ -479,9 +481,50 @@ impl fmt::Debug for Device {
     }
 }
 
+enum StreamAudioUnit {
+    Hal(AudioUnit),
+    Voice(VoiceProcessingUnit),
+}
+impl From<AudioUnit> for StreamAudioUnit {
+    fn from(unit: AudioUnit) -> Self {
+        Self::Hal(unit)
+    }
+}
+impl From<VoiceProcessingUnit> for StreamAudioUnit {
+    fn from(unit: VoiceProcessingUnit) -> Self {
+        Self::Voice(unit)
+    }
+}
+impl StreamAudioUnit {
+    fn start(&mut self) -> Result<(), coreaudio::Error> {
+        match self {
+            Self::Hal(unit) => unit.start(),
+            Self::Voice(unit) => unit.start(),
+        }
+    }
+    fn stop(&mut self) -> Result<(), coreaudio::Error> {
+        match self {
+            Self::Hal(unit) => unit.stop(),
+            Self::Voice(unit) => unit.stop(),
+        }
+    }
+    #[cfg(test)]
+    fn get_property<T>(
+        &self,
+        id: u32,
+        scope: Scope,
+        element: Element,
+    ) -> Result<T, coreaudio::Error> {
+        match self {
+            Self::Hal(unit) => unit.get_property(id, scope, element),
+            Self::Voice(unit) => unit.get_property(id, scope, element),
+        }
+    }
+}
+
 struct StreamInner {
     playing: bool,
-    audio_unit: AudioUnit,
+    audio_unit: StreamAudioUnit,
     /// Manage the lifetime of the closure that handles device disconnection.
     _disconnect_listener: Option<AudioObjectPropertyListener>,
     // Track the device with which the audio unit was spawned.
@@ -652,7 +695,7 @@ impl Device {
         let stream = Stream::new(StreamInner {
             playing: true,
             _disconnect_listener: None,
-            audio_unit,
+            audio_unit: audio_unit.into(),
             device_id: self.audio_device_id,
         });
 
@@ -713,7 +756,15 @@ impl Device {
         // Set the buffersize
         match config.buffer_size {
             BufferSize::Fixed(v) => {
-                let buffer_size_range = get_io_buffer_frame_size_range(&audio_unit)?;
+                let range: AudioValueRange = audio_unit.get_property(
+                    kAudioDevicePropertyBufferFrameSizeRange,
+                    Scope::Global,
+                    Element::Output,
+                )?;
+                let buffer_size_range = SupportedBufferSize::Range {
+                    min: range.mMinimum as u32,
+                    max: range.mMaximum as u32,
+                };
                 match buffer_size_range {
                     SupportedBufferSize::Range { min, max } => {
                         if v >= min && v <= max {
@@ -741,48 +792,59 @@ impl Device {
         let bytes_per_channel = sample_format.sample_size();
         let sample_rate = config.sample_rate;
         type Args = render_callback::Args<data::Raw>;
-        audio_unit.set_input_callback(move |args: Args| unsafe {
-            let ptr = (*args.data.data).mBuffers.as_ptr();
-            let len = (*args.data.data).mNumberBuffers as usize;
-            let buffers: &[AudioBuffer] = slice::from_raw_parts(ptr, len);
+        let render_error_callback = error_callback.clone();
+        audio_unit.set_input_callback(
+            move |args: Args| unsafe {
+                let ptr = (*args.data.data).mBuffers.as_ptr();
+                let len = (*args.data.data).mNumberBuffers as usize;
+                let buffers: &[AudioBuffer] = slice::from_raw_parts(ptr, len);
 
-            // TODO: Perhaps loop over all buffers instead?
-            let AudioBuffer {
-                mNumberChannels: channels,
-                mDataByteSize: data_byte_size,
-                mData: data,
-            } = buffers[0];
+                // TODO: Perhaps loop over all buffers instead?
+                let AudioBuffer {
+                    mNumberChannels: channels,
+                    mDataByteSize: data_byte_size,
+                    mData: data,
+                } = buffers[0];
 
-            let data = data as *mut ();
-            let len = data_byte_size as usize / bytes_per_channel;
-            let data = Data::from_parts(data, len, sample_format);
+                let data = data as *mut ();
+                let len = data_byte_size as usize / bytes_per_channel;
+                let data = Data::from_parts(data, len, sample_format);
 
-            // TODO: Need a better way to get delay, for now we assume a double-buffer offset.
-            let callback = match host_time_to_stream_instant(args.time_stamp.mHostTime) {
-                Err(err) => {
-                    (error_callback.lock().unwrap())(err.into());
-                    return Err(());
-                }
-                Ok(cb) => cb,
-            };
-            let buffer_frames = len / channels as usize;
-            let delay = frames_to_duration(buffer_frames, sample_rate);
-            let capture = callback
-                .sub(delay)
-                .expect("`capture` occurs before origin of alsa `StreamInstant`");
-            let timestamp = crate::InputStreamTimestamp { callback, capture };
+                // TODO: Need a better way to get delay, for now we assume a double-buffer offset.
+                let callback = match host_time_to_stream_instant(args.time_stamp.mHostTime) {
+                    Err(err) => {
+                        (error_callback.lock().unwrap())(err.into());
+                        return Err(());
+                    }
+                    Ok(cb) => cb,
+                };
+                let buffer_frames = len / channels as usize;
+                let delay = frames_to_duration(buffer_frames, sample_rate);
+                let capture = callback
+                    .sub(delay)
+                    .expect("`capture` occurs before origin of alsa `StreamInstant`");
+                let timestamp = crate::InputStreamTimestamp { callback, capture };
 
-            let info = InputCallbackInfo { timestamp };
-            data_callback(&data, &info);
-            Ok(())
-        })?;
+                let info = InputCallbackInfo { timestamp };
+                data_callback(&data, &info);
+                Ok(())
+            },
+            move |status| {
+                (render_error_callback.lock().unwrap())(
+                    BackendSpecificError {
+                        description: format!("VoiceProcessingIO render failed: {status}"),
+                    }
+                    .into(),
+                );
+            },
+        )?;
 
         audio_unit.initialize()?;
 
         let stream = Stream::new(StreamInner {
             playing: true,
             _disconnect_listener: None,
-            audio_unit,
+            audio_unit: audio_unit.into(),
             device_id: self.audio_device_id,
         });
 
@@ -887,7 +949,7 @@ impl Device {
         let stream = Stream::new(StreamInner {
             playing: true,
             _disconnect_listener: None,
-            audio_unit,
+            audio_unit: audio_unit.into(),
             device_id: self.audio_device_id,
         });
 
@@ -905,7 +967,7 @@ impl Device {
 
 #[cfg(target_os = "macos")]
 fn apply_voice_processing_property(
-    audio_unit: &mut AudioUnit,
+    audio_unit: &mut VoiceProcessingUnit,
     property: u32,
     value: &u32,
 ) -> Result<(), BuildStreamError> {
@@ -921,7 +983,7 @@ fn apply_voice_processing_property(
 
 #[cfg(target_os = "macos")]
 fn apply_voice_processing_flags(
-    audio_unit: &mut AudioUnit,
+    audio_unit: &mut VoiceProcessingUnit,
     voice_processing: &crate::MacosVoiceProcessingInputConfig,
 ) -> Result<(), BuildStreamError> {
     let bypass = u32::from(voice_processing.voice_processing_bypass.unwrap_or(false));
@@ -959,11 +1021,8 @@ fn build_voice_processing_audio_unit(
     config: &StreamConfig,
     sample_format: SampleFormat,
     voice_processing: &crate::MacosVoiceProcessingInputConfig,
-) -> Result<AudioUnit, BuildStreamError> {
-    let mut audio_unit = AudioUnit::new(coreaudio::audio_unit::IOType::VoiceProcessingIO)?;
-    // coreaudio-rs initializes on construction. Device/IO topology must be
-    // configured before initialization, then initialized after both callbacks.
-    audio_unit.uninitialize()?;
+) -> Result<VoiceProcessingUnit, BuildStreamError> {
+    let mut audio_unit = VoiceProcessingUnit::new()?;
     let output = default_output_device().ok_or(BuildStreamError::DeviceNotAvailable)?;
 
     // VPIO's duplex topology differs from input-only AUHAL. Its output device
@@ -995,25 +1054,7 @@ fn build_voice_processing_audio_unit(
     )?;
     // Keep the duplex render side running, without replaying captured meeting
     // audio. No ring buffer, extra reference playback, allocation, or lock.
-    audio_unit.set_render_callback(|mut args: render_callback::Args<data::Raw>| {
-        unsafe {
-            let list = &mut *args.data.data;
-            for buffer in
-                slice::from_raw_parts_mut(list.mBuffers.as_mut_ptr(), list.mNumberBuffers as usize)
-            {
-                if !buffer.mData.is_null() {
-                    std::ptr::write_bytes(
-                        buffer.mData as *mut u8,
-                        0,
-                        buffer.mDataByteSize as usize,
-                    );
-                }
-            }
-        }
-        args.flags
-            .insert(render_callback::action_flags::ActionFlags::OUTPUT_IS_SILENCE);
-        Ok(())
-    })?;
+    audio_unit.set_silent_render_callback()?;
     apply_voice_processing_flags(&mut audio_unit, voice_processing)?;
 
     Ok(audio_unit)
@@ -1021,7 +1062,7 @@ fn build_voice_processing_audio_unit(
 
 #[cfg(target_os = "macos")]
 fn configure_voice_processing_stream_format(
-    audio_unit: &mut AudioUnit,
+    audio_unit: &mut VoiceProcessingUnit,
     requested: &AudioStreamBasicDescription,
 ) -> Result<(), BuildStreamError> {
     let set_result = audio_unit.set_property(
