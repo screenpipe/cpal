@@ -1367,8 +1367,8 @@ mod vpio_regression_tests {
         let expected_mic = default_input_device().unwrap().audio_device_id;
         let expected_output = default_output_device().unwrap().audio_device_id;
         for (rate, bypass) in [
-            (16000, false),
             (48000, false),
+            (16000, false),
             (96000, false),
             (48000, true),
         ] {
