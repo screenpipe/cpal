@@ -1,3 +1,5 @@
+// screenpipe — AI that knows everything you've seen, said, or heard
+// https://screenpipe.com
 //! Platform-specific items.
 //!
 //! This module also contains the implementation of the platform's dynamically dispatched [`Host`]
@@ -373,6 +375,33 @@ macro_rules! impl_platform_host {
                     $(
                         $(#[cfg($feat)])?
                         DeviceInner::$HostVariant(ref d) => d.default_output_config(),
+                    )*
+                }
+            }
+
+            // Forward the macOS option through the dynamically dispatched Device.
+            // The trait default calls build_input_stream_raw and discards it.
+            #[cfg(target_os = "macos")]
+            fn build_input_stream<T, D, E>(
+                &self,
+                config: &crate::StreamConfig,
+                data_callback: D,
+                error_callback: E,
+                timeout: Option<std::time::Duration>,
+                voice_processing: Option<crate::MacosVoiceProcessingInputConfig>,
+            ) -> Result<Self::Stream, crate::BuildStreamError>
+            where
+                T: crate::SizedSample,
+                D: FnMut(&[T], &crate::InputCallbackInfo) + Send + 'static,
+                E: FnMut(crate::StreamError) + Send + 'static,
+            {
+                match self.0 {
+                    $(
+                        $(#[cfg($feat)])?
+                        DeviceInner::$HostVariant(ref d) => d
+                            .build_input_stream(config, data_callback, error_callback, timeout, voice_processing)
+                            .map(StreamInner::$HostVariant)
+                            .map(Stream::from),
                     )*
                 }
             }
