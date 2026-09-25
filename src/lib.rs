@@ -319,7 +319,7 @@ pub struct MacosVoiceProcessingInputConfig {
 
 #[cfg(target_os = "macos")]
 impl MacosVoiceProcessingInputConfig {
-    /// Screenpipe defaults: processing on, AGC off, bypass off, output muted, light ducking.
+    /// Screenpipe defaults: processing on, AGC off, bypass off, microphone unmuted, light ducking.
     pub fn screenpipe_aec() -> Self {
         Self {
             enable_voice_processing: true,
